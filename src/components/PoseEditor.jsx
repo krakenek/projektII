@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useMemo } from "react";
 import * as poseDetection from "@tensorflow-models/pose-detection";
 import "@tensorflow/tfjs-backend-webgl";
 import * as tf from "@tensorflow/tfjs";
-import { Stage, Layer, Image as KonvaImage, Circle, Line } from "react-konva";
+import { Stage, Layer, Image as KonvaImage, Circle, Line, Text as KonvaText } from "react-konva";
+import { calculateAngle } from "../utils/mathUtils";
 
 export function PoseEditor({ image }) {
   const [imgElement, setImgElement] = useState(null);
@@ -16,71 +17,55 @@ export function PoseEditor({ image }) {
     feet: null,
   });
 
-  // Načítání obrázku
+  // Load image
   useEffect(() => {
-    const loadImage = () => {
-      const img = new window.Image();
-      img.src = image;
-      img.onload = () => {
-        console.log("✅ Obrázek načten");
-        setImgElement(img);
-      };
-      img.onerror = (err) => {
-        console.error("❌ Chyba při načítání obrázku:", err);
-      };
-    };
-    loadImage();
-  }, [image]);
+  const img = new window.Image();
+  img.crossOrigin = "anonymous";
+  img.src = image;
+  img.onload = () => setImgElement(img);
+  img.onerror = (err) => console.error("Image load error:", err);
 
-  // Detekce póz
+  return () => {
+    img.onload = null;
+    img.onerror = null;
+  };
+}, [image]);
+
+
+  // Detect pose
   useEffect(() => {
-    if (!imgElement) return;
+  if (!imgElement) return;
 
-    const detectPose = async () => {
-      try {
-        await tf.ready();
-        await tf.setBackend('webgl');
+  let isMounted = true;
+  let detector;
 
-        const detector = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet);
-        console.log("✅ Detektor načten");
+  const detectPose = async () => {
+    await tf.ready();
+    await tf.setBackend("webgl");
+    detector = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet);
 
-        const poses = await detector.estimatePoses(imgElement);
-        console.log("✅ Detekováno:", poses);
+    if (!isMounted) return; // prevent setting state if unmounted
+    const poses = await detector.estimatePoses(imgElement);
+    if (poses.length > 0) setKeypoints(poses[0].keypoints);
+  };
 
-        if (poses.length > 0) {
-          setKeypoints(poses[0].keypoints);
-        } else {
-          console.warn("⚠️ Nebyly detekovány žádné pózy");
-        }
-      } catch (error) {
-        console.error("❌ Chyba při detekci:", error);
-      }
-    };
+  detectPose();
 
-    detectPose();
+  return () => {
+    isMounted = false;
+    if (detector && detector.dispose) {
+      detector.dispose();
+    }
+  };
   }, [imgElement]);
 
-  // Funkce pro dragování bodů
-  const handleDragMove = (e, part) => {
-    const newPos = { x: e.target.x(), y: e.target.y() };
-    setUserPositions((prev) => ({
-      ...prev,
-      [part]: newPos,
-    }));
-  };
+  // Center calculation
+  const getCenter = (a, b, fy = 1) =>
+    (!a || !b || a.x === undefined || b.x === undefined)
+      ? { x: 0, y: 0 }
+      : { x: (a.x + b.x) / 2, y: ((a.y + b.y) / 2) * fy };
 
-  const getCenter = (pointA, pointB, factorY = 1) => {
-    if (!pointA || !pointB || typeof pointA.x === 'undefined' || typeof pointB.x === 'undefined') {
-      console.warn('⚠️ Jeden nebo oba body jsou neplatné: ', pointA, pointB);
-      return { x: 0, y: 0 };
-    }
-    return {
-      x: (pointA.x + pointB.x) / 2,
-      y: (pointA.y + pointB.y) / 2 * factorY,
-    };
-  };
-
-  // Získání klíčových bodů
+  // Keypoints
   const leftShoulder = keypoints[5] || { x: 0, y: 0 };
   const rightShoulder = keypoints[6] || { x: 0, y: 0 };
   const leftHip = keypoints[11] || { x: 0, y: 0 };
@@ -88,96 +73,107 @@ export function PoseEditor({ image }) {
   const leftFoot = keypoints[15] || { x: 0, y: 0 };
   const rightFoot = keypoints[16] || { x: 0, y: 0 };
 
-  // Výpočet středů
-  const calculatedCenterShoulders = getCenter(leftShoulder, rightShoulder, 0.91);
-  const calculatedCenterHips = getCenter(leftHip, rightHip, 0.95);
-  const calculatedCenterFeet = getCenter(leftFoot, rightFoot, 1);
+  // Centers
+  const calculatedCenterShoulders = getCenter(leftShoulder, rightShoulder, 0.84);
+  const calculatedCenterHips = getCenter(leftHip, rightHip, 0.91);
+  const calculatedCenterFeet = getCenter(leftFoot, rightFoot, 1.04);
 
-  // Aktualizace středů pouze tehdy, když se změní
+  // Update centers
   useEffect(() => {
     if (
       calculatedCenterShoulders.x !== centerShoulders.x ||
       calculatedCenterShoulders.y !== centerShoulders.y
-    ) {
-      setCenterShoulders(calculatedCenterShoulders);
-    }
-
+    ) setCenterShoulders(calculatedCenterShoulders);
     if (
       calculatedCenterHips.x !== centerHips.x ||
       calculatedCenterHips.y !== centerHips.y
-    ) {
-      setCenterHips(calculatedCenterHips);
-    }
-
+    ) setCenterHips(calculatedCenterHips);
     if (
       calculatedCenterFeet.x !== centerFeet.x ||
       calculatedCenterFeet.y !== centerFeet.y
-    ) {
-      setCenterFeet(calculatedCenterFeet);
-    }
+    ) setCenterFeet(calculatedCenterFeet);
   }, [
-    calculatedCenterShoulders,
-    calculatedCenterHips,
-    calculatedCenterFeet,
-    centerShoulders,
-    centerHips,
-    centerFeet,
+    calculatedCenterShoulders, calculatedCenterHips, calculatedCenterFeet,
+    centerShoulders, centerHips, centerFeet,
   ]);
 
-  // Použití uživatelských pozic pro vykreslování
+  // Drag handler
+  const handleDragMove = (e, part) => {
+    const newPos = { x: e.target.x(), y: e.target.y() };
+    setUserPositions((prev) => ({ ...prev, [part]: newPos }));
+  };
+
+  // Final positions
   const finalShoulders = userPositions.shoulders || centerShoulders;
   const finalHips = userPositions.hips || centerHips;
   const finalFeet = userPositions.feet || centerFeet;
 
-  if (!imgElement) {
-    console.log("⏳ Čekám na načítání obrázku...");
-    return <div>Načítání obrázku...</div>;
-  }
+  // Angle
+  const angle = useMemo(() => {
+  if (!finalShoulders || !finalHips || !finalFeet) return 0;
+  return calculateAngle(finalShoulders, finalHips, finalFeet);
+}, [finalShoulders, finalHips, finalFeet]);
+
+
+  if (!imgElement) return <div>Načítání obrázku...</div>;
+
+  const scale = imgElement.width / 1200;
+  const radius = 5 * scale;
+  const fontSize = 24 * scale;
 
   return (
     <div className="w-full max-w-5xl">
       <Stage width={imgElement.width} height={imgElement.height}>
         <Layer>
           <KonvaImage image={imgElement} />
-          {/* Vykreslení čar mezi body */}
+          {(
+            <>
+              <KonvaText
+                x={finalHips.x + 30}
+                y={finalHips.y - 30}
+                text={`Úhel: ${angle.toFixed(1)}°`}
+                fontSize={fontSize}
+                fill="red"
+              />
+            </>
+          )}
           <Line
             points={[finalShoulders.x, finalShoulders.y, finalHips.x, finalHips.y]}
             stroke="blue"
-            strokeWidth={2}
+            strokeWidth={4}
             lineCap="round"
             lineJoin="round"
           />
           <Line
             points={[finalHips.x, finalHips.y, finalFeet.x, finalFeet.y]}
             stroke="green"
-            strokeWidth={2}
+            strokeWidth={4}
             lineCap="round"
             lineJoin="round"
           />
-          {/* Vykreslení center body parts */}
           <Circle
             x={finalShoulders.x}
             y={finalShoulders.y}
-            radius={10}
+            radius={radius}
             fill="blue"
             draggable
-            onDragMove={(e) => handleDragMove(e, 'shoulders')}
+            onDragMove={(e) => handleDragMove(e, "shoulders")}
           />
           <Circle
             x={finalHips.x}
             y={finalHips.y}
-            radius={10}
+            radius={radius}
             fill="green"
             draggable
-            onDragMove={(e) => handleDragMove(e, 'hips')}
+            onDragMove={(e) => handleDragMove(e, "hips")}
           />
           <Circle
             x={finalFeet.x}
             y={finalFeet.y}
-            radius={10}
+            radius={radius}
             fill="purple"
             draggable
-            onDragMove={(e) => handleDragMove(e, 'feet')}
+            onDragMove={(e) => handleDragMove(e, "feet")}
           />
         </Layer>
       </Stage>
